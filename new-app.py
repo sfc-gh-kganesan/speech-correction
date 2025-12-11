@@ -3,17 +3,18 @@ import os
 import streamlit as st
 from audiorecorder import audiorecorder
 from faster_whisper import WhisperModel
-from cerebras.cloud.sdk import Cerebras
+from snowflake_agent import SnowflakeAgent
 
 # ---------------------------
 # Streamlit page setup
 # ---------------------------
-st.set_page_config(page_title="Local Whisper + Cerebras", page_icon="🎙️")
-st.title("🎙️ Local Whisper Transcriber with Cerebras Cleanup")
+st.set_page_config(page_title="Snowflake Voice Assistant", page_icon="❄️")
+st.title("❄️ Snowflake Voice Assistant")
 
 st.write(
-    "Record audio below and transcribe it locally using Whisper (faster-whisper). "
-    "Then optionally clean up the transcript using a Cerebras LLM."
+    "Ask questions about Snowflake using your voice! "
+    "Record your question, get it transcribed, and receive an AI-powered answer "
+    "based on the Snowflake FAQ knowledge base."
 )
 
 # ---------------------------
@@ -25,87 +26,36 @@ def load_whisper_model():
     return WhisperModel("small", device="cpu")
 
 @st.cache_resource
-def get_cerebras_client():
+def get_snowflake_agent():
     api_key = os.environ.get("CEREBRAS_API_KEY")
     if not api_key:
         raise RuntimeError(
             "CEREBRAS_API_KEY environment variable is not set. "
             "Please set it before running the app."
         )
-    return Cerebras(api_key=api_key)
+    return SnowflakeAgent(api_key=api_key)
 
 model = load_whisper_model()
 
-# Lazy init of Cerebras client only if we actually need it
-cerebras_client = None
-
 # ---------------------------
-# Helper: refine transcript with Cerebras
+# Session state
 # ---------------------------
-
-def refine_transcript_with_cerebras(raw_text: str) -> str:
-    """
-    Send the raw Whisper transcript to a Cerebras LLM
-    and get back cleaned / corrected text.
-    Handles errors gracefully.
-    """
-    global cerebras_client
-    if cerebras_client is None:
-        cerebras_client = get_cerebras_client()
-
-    system_prompt = (
-        "You are a transcription post-processor. "
-        "You receive raw automatic speech recognition (ASR) output. "
-        "Your job is to:\n"
-        "- fix spelling and grammar\n"
-        "- add punctuation and sentence breaks\n"
-        "- keep the meaning unchanged\n"
-        "Return only the cleaned text, no explanations."
-    )
-
-    try:
-        response = cerebras_client.chat.completions.create(
-            model="llama-3.3-70b",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": raw_text},
-            ],
-        )
-
-        # Validate the response
-        if (
-            not hasattr(response, "choices")
-            or len(response.choices) == 0
-            or not response.choices[0].message
-        ):
-            st.error("⚠️ Cerebras returned an empty or invalid response.")
-            return ""
-
-        return response.choices[0].message.content.strip()
-
-    except Exception as e:
-        st.error("❌ Cerebras LLM failed to process the request.")
-        st.exception(e)  # prints full traceback in Streamlit
-
-        return ""
-
-
-# ---------------------------
-# Session state for transcript
-# ---------------------------
-if "raw_transcript" not in st.session_state:
-    st.session_state.raw_transcript = ""
+if "transcript" not in st.session_state:
+    st.session_state.transcript = ""
+if "answer" not in st.session_state:
+    st.session_state.answer = ""
 
 # ---------------------------
 # Audio recorder
 # ---------------------------
+st.subheader("🎙️ Step 1: Record Your Question")
 audio = audiorecorder("🔴 Click to start / stop recording", "⏺️ Recording...")
 
 if len(audio) > 0:
     st.audio(audio.export().read(), format="audio/wav")
     st.success("Recording captured! Click the button below to transcribe.")
 
-    if st.button("📝 Transcribe locally with Whisper"):
+    if st.button("📝 Transcribe with Whisper"):
         with st.spinner("Transcribing... this may take a few seconds"):
             # Export audio to WAV bytes
             wav_bytes_io = io.BytesIO()
@@ -122,23 +72,74 @@ if len(audio) > 0:
             # Collect transcript text
             transcript_text = " ".join([seg.text for seg in segments])
 
-        st.session_state.raw_transcript = transcript_text
+        st.session_state.transcript = transcript_text
+        st.session_state.answer = ""  # Clear previous answer
 
 # ---------------------------
-# Show raw transcript (if any)
+# Show transcript and get answer
 # ---------------------------
-if st.session_state.raw_transcript:
-    st.subheader("Raw transcript (Whisper)")
-    st.write(st.session_state.raw_transcript)
+if st.session_state.transcript:
+    st.subheader("📄 Step 2: Your Transcribed Question")
+    
+    # Allow editing the transcript
+    edited_transcript = st.text_area(
+        "Edit your question if needed:",
+        value=st.session_state.transcript,
+        height=100,
+        key="transcript_editor"
+    )
+    
+    st.subheader("🤖 Step 3: Get Your Answer")
+    
+    if st.button("❄️ Ask Snowflake Agent"):
+        with st.spinner("Consulting the Snowflake knowledge base..."):
+            try:
+                agent = get_snowflake_agent()
+                answer = agent.answer(edited_transcript)
+                st.session_state.answer = answer
+            except Exception as e:
+                st.error(f"Error getting answer: {str(e)}")
 
-    # ---------------------------
-    # Cerebras cleanup button
-    # ---------------------------
-    if st.button("✨ Clean & correct with Cerebras"):
-        with st.spinner("Refining transcript with Cerebras..."):
-            refined_text = refine_transcript_with_cerebras(
-                st.session_state.raw_transcript
-            )
+# ---------------------------
+# Display the answer
+# ---------------------------
+if st.session_state.answer:
+    st.subheader("💬 Answer")
+    st.markdown(st.session_state.answer)
+    
+    # Option to ask follow-up
+    st.divider()
+    st.caption("Want to ask another question? Record a new audio above or type below:")
+    
+    followup = st.text_input("Type a follow-up question:", key="followup_input")
+    if followup and st.button("Ask Follow-up"):
+        with st.spinner("Getting answer..."):
+            try:
+                agent = get_snowflake_agent()
+                answer = agent.answer(followup)
+                st.session_state.answer = answer
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error getting answer: {str(e)}")
 
-        st.subheader("Refined transcript (Cerebras)")
-        st.write(refined_text)
+# ---------------------------
+# Sidebar with info
+# ---------------------------
+with st.sidebar:
+    st.header("ℹ️ About")
+    st.write(
+        "This app uses:\n"
+        "- **Whisper** for local speech-to-text\n"
+        "- **Cerebras LLM** for AI-powered answers\n"
+        "- **Snowflake FAQ** as the knowledge base"
+    )
+    
+    st.divider()
+    st.header("💡 Example Questions")
+    st.write(
+        "- What is a virtual warehouse?\n"
+        "- Explain Time Travel in Snowflake\n"
+        "- What's the difference between streams and tasks?\n"
+        "- How does zero-copy cloning work?\n"
+        "- What is Snowflake Cortex AI?"
+    )
